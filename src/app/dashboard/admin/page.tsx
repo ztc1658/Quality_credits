@@ -1,17 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import styles from "../dashboard.module.css";
 
-interface DashboardUser {
-  id: number;
-  username: string;
-  name: string;
-  role: string;
-}
-
-interface Stats {
+type UserLite = { id: number; username: string; name: string; role: string; class_name?: string };
+type Stats = {
   users: number;
   teachers: number;
   students: number;
@@ -19,42 +13,11 @@ interface Stats {
   departments: number;
   records: number;
   applications: number;
-}
-
-interface SummaryRow {
-  student_id: number;
-  username: string;
-  name: string;
-  class_name: string;
-  total_score: number;
-  base_score: number;
-}
-
-interface DetailRow {
-  id: number;
-  class_name: string;
-  student_name: string;
-  student_username: string;
-  category: string;
-  reason: string;
-  points: number;
-  source?: string;
-  created_at: string;
-}
-
-interface ExcelImportResult {
-  message: string;
-  importedClasses: number;
-  importedStudents: number;
-  importedRecords: number;
-  importedProfiles: number;
-  autoCreatedStudents: number;
-  warnings: string[];
-}
+};
 
 export default function AdminDashboard() {
   const router = useRouter();
-  const [user, setUser] = useState<DashboardUser | null>(null);
+  const [currentUser, setCurrentUser] = useState<any>(null);
   const [activeTab, setActiveTab] = useState("overview");
 
   const [stats, setStats] = useState<Stats>({
@@ -66,47 +29,51 @@ export default function AdminDashboard() {
     records: 0,
     applications: 0,
   });
+  const [users, setUsers] = useState<UserLite[]>([]);
+  const [teachers, setTeachers] = useState<any[]>([]);
+  const [classes, setClasses] = useState<any[]>([]);
+  const [departments, setDepartments] = useState<any[]>([]);
+  const [summaryRows, setSummaryRows] = useState<any[]>([]);
+  const [detailRows, setDetailRows] = useState<any[]>([]);
 
-  const [excelPaths, setExcelPaths] = useState({
-    addDetailsPath: "data/template-files/add-details.xlsx",
-    minusDetailsPath: "data/template-files/minus-details.xlsx",
-    summaryPath: "data/template-files/summary.xlsx",
-  });
-  const [excelImporting, setExcelImporting] = useState(false);
-  const [excelResult, setExcelResult] = useState<ExcelImportResult | null>(null);
-  const [excelError, setExcelError] = useState("");
+  const [deptName, setDeptName] = useState("");
+  const [newClass, setNewClass] = useState({ name: "", grade: "", department_id: "" });
+  const [assignForm, setAssignForm] = useState({ teacher_id: "", class_id: "" });
 
-  const [summaryRows, setSummaryRows] = useState<SummaryRow[]>([]);
-  const [detailRows, setDetailRows] = useState<DetailRow[]>([]);
-  const [recordsLoading, setRecordsLoading] = useState(false);
+  const [importRole, setImportRole] = useState("Student");
+  const [importClassId, setImportClassId] = useState("");
+  const [importText, setImportText] = useState("");
+  const [importExcelFile, setImportExcelFile] = useState<File | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
-  const fetchJson = async <T,>(url: string): Promise<T> => {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error("request_failed");
-    return (await response.json()) as T;
+  const clearTips = () => {
+    setMessage("");
+    setError("");
   };
 
-  const loadOverview = async () => {
-    const data = await fetchJson<Stats>("/api/admin/stats");
-    setStats(data);
-  };
+  const refreshAll = useCallback(async () => {
+    const [statsRes, usersRes, classesRes, teachersRes, departmentsRes, recordsRes] =
+      await Promise.all([
+        fetch("/api/admin/stats"),
+        fetch("/api/admin/users"),
+        fetch("/api/admin/classes"),
+        fetch("/api/admin/classes?type=teachers"),
+        fetch("/api/admin/classes?type=departments"),
+        fetch("/api/admin/records?mode=all"),
+      ]);
 
-  const loadRecords = async () => {
-    setRecordsLoading(true);
-    try {
-      const payload = await fetchJson<{ summary: SummaryRow[]; details: DetailRow[] }>(
-        "/api/admin/records?mode=all"
-      );
-      setSummaryRows(payload.summary ?? []);
-      setDetailRows(payload.details ?? []);
-    } finally {
-      setRecordsLoading(false);
+    if (statsRes.ok) setStats(await statsRes.json());
+    if (usersRes.ok) setUsers(await usersRes.json());
+    if (classesRes.ok) setClasses(await classesRes.json());
+    if (teachersRes.ok) setTeachers(await teachersRes.json());
+    if (departmentsRes.ok) setDepartments(await departmentsRes.json());
+    if (recordsRes.ok) {
+      const data = await recordsRes.json();
+      setSummaryRows(data.summary ?? []);
+      setDetailRows(data.details ?? []);
     }
-  };
-
-  const refreshAll = async () => {
-    await Promise.all([loadOverview(), loadRecords()]);
-  };
+  }, []);
 
   useEffect(() => {
     const stored = localStorage.getItem("user");
@@ -114,39 +81,112 @@ export default function AdminDashboard() {
       router.push("/");
       return;
     }
-    const current = JSON.parse(stored) as DashboardUser;
-    if (current.role !== "Admin") {
+    const user = JSON.parse(stored);
+    if (user.role !== "Admin") {
       router.push("/");
       return;
     }
-    setUser(current);
-    refreshAll().catch(() => {
-      // ignore on first paint
-    });
-  }, [router]);
+    setCurrentUser(user);
+    refreshAll().catch(() => setError("初始化数据失败"));
+  }, [refreshAll, router]);
 
-  const handleExcelImport = async () => {
-    setExcelImporting(true);
-    setExcelResult(null);
-    setExcelError("");
-    try {
-      const response = await fetch("/api/admin/import-excel", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...excelPaths, resetDatabase: true }),
-      });
-      const data = (await response.json()) as ExcelImportResult | { error: string };
-      if (!response.ok || "error" in data) {
-        setExcelError("error" in data ? data.error : "导入失败");
-        return;
-      }
-      setExcelResult(data);
-      await refreshAll();
-    } catch {
-      setExcelError("模板导入失败，请检查文件路径");
-    } finally {
-      setExcelImporting(false);
-    }
+  const classOptions = useMemo(
+    () => classes.map((item) => ({ value: String(item.id), label: item.name })),
+    [classes]
+  );
+
+  const handleCreateDepartment = async () => {
+    clearTips();
+    if (!deptName.trim()) return;
+    const res = await fetch("/api/admin/classes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "createDepartment", name: deptName.trim() }),
+    });
+    if (!res.ok) return setError("新增院系失败");
+    setDeptName("");
+    setMessage("新增院系成功");
+    await refreshAll();
+  };
+
+  const handleCreateClass = async () => {
+    clearTips();
+    if (!newClass.name || !newClass.department_id) return;
+    const res = await fetch("/api/admin/classes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "createClass",
+        name: newClass.name.trim(),
+        grade: newClass.grade.trim() || "未知",
+        department_id: Number(newClass.department_id),
+      }),
+    });
+    if (!res.ok) return setError("新增班级失败");
+    setNewClass({ name: "", grade: "", department_id: "" });
+    setMessage("新增班级成功");
+    await refreshAll();
+  };
+
+  const handleAssignTeacher = async () => {
+    clearTips();
+    if (!assignForm.teacher_id || !assignForm.class_id) return;
+    const res = await fetch("/api/admin/classes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "assignTeacher",
+        teacher_id: Number(assignForm.teacher_id),
+        class_id: Number(assignForm.class_id),
+      }),
+    });
+    if (!res.ok) return setError("分配失败");
+    setAssignForm({ teacher_id: "", class_id: "" });
+    setMessage("教师分配成功");
+    await refreshAll();
+  };
+
+  const handleImportFromText = async () => {
+    clearTips();
+    const lines = importText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return;
+    const usersPayload = lines.map((line) => {
+      const parts = line.split(/[,，\t]/).map((v) => v.trim());
+      return {
+        username: parts[0],
+        name: parts[1] || parts[0],
+        role: importRole,
+        class_id: importRole === "Student" && importClassId ? Number(importClassId) : undefined,
+      };
+    });
+    const res = await fetch("/api/admin/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ users: usersPayload }),
+    });
+    const data = await res.json();
+    if (!res.ok) return setError(data.error || "导入失败");
+    setMessage(data.message || "导入成功");
+    await refreshAll();
+  };
+
+  const handleImportFromExcel = async () => {
+    clearTips();
+    if (!importExcelFile) return setError("请先选择Excel文件");
+    const formData = new FormData();
+    formData.append("file", importExcelFile);
+    formData.append("role", importRole);
+    if (importRole === "Student" && importClassId) formData.append("classId", importClassId);
+
+    const res = await fetch("/api/admin/import", { method: "POST", body: formData });
+    const data = await res.json();
+    if (!res.ok) return setError(data.error || "Excel导入失败");
+    setMessage(data.message || "Excel导入成功");
+    setImportExcelFile(null);
+    await refreshAll();
   };
 
   const logout = () => {
@@ -154,122 +194,147 @@ export default function AdminDashboard() {
     router.push("/");
   };
 
-  if (!user) return null;
+  if (!currentUser) return null;
 
   return (
     <div className={styles.dashboard}>
       <nav className={styles.sidebar}>
         <div className={styles.sidebarHeader}>
           <h2>素质学分平台</h2>
-          <p>管理员控制台</p>
+          <p>超级管理员</p>
         </div>
-        <button className={activeTab === "overview" ? styles.navItemActive : styles.navItem} onClick={() => setActiveTab("overview")}>
-          <span className={styles.navIcon}>📊</span> 数据概览
-        </button>
-        <button className={activeTab === "import" ? styles.navItemActive : styles.navItem} onClick={() => setActiveTab("import")}>
-          <span className={styles.navIcon}>📥</span> 模板导入
-        </button>
-        <button className={activeTab === "records" ? styles.navItemActive : styles.navItem} onClick={() => setActiveTab("records")}>
-          <span className={styles.navIcon}>📋</span> 学分记录
-        </button>
-        <button className={styles.logoutBtn} onClick={logout}>
-          <span className={styles.navIcon}>🚪</span> 退出登录
-        </button>
+        <button className={activeTab === "overview" ? styles.navItemActive : styles.navItem} onClick={() => setActiveTab("overview")}>📊 数据概览</button>
+        <button className={activeTab === "accounts" ? styles.navItemActive : styles.navItem} onClick={() => setActiveTab("accounts")}>👥 账号管理</button>
+        <button className={activeTab === "classes" ? styles.navItemActive : styles.navItem} onClick={() => setActiveTab("classes")}>🏫 班级与分配</button>
+        <button className={activeTab === "records" ? styles.navItemActive : styles.navItem} onClick={() => setActiveTab("records")}>📋 学分总览</button>
+        <button className={styles.logoutBtn} onClick={logout}>🚪 退出登录</button>
       </nav>
 
       <main className={styles.content}>
+        {message && <div className={styles.statusApproved} style={{ marginBottom: "1rem", display: "inline-block" }}>{message}</div>}
+        {error && <div className={styles.statusRejected} style={{ marginBottom: "1rem", display: "inline-block" }}>{error}</div>}
+
         {activeTab === "overview" && (
           <div className={styles.statsGrid}>
-            <div className={styles.statCard}><div className={styles.statLabel}>注册用户</div><div className={styles.statValue}>{stats.users}</div></div>
-            <div className={styles.statCard}><div className={styles.statLabel}>学生人数</div><div className={styles.statValue}>{stats.students}</div></div>
-            <div className={styles.statCard}><div className={styles.statLabel}>班级数量</div><div className={styles.statValue}>{stats.classes}</div></div>
-            <div className={styles.statCard}><div className={styles.statLabel}>学分流水</div><div className={styles.statValue}>{stats.records}</div></div>
+            <div className={styles.statCard}><div className={styles.statLabel}>总用户</div><div className={styles.statValue}>{stats.users}</div></div>
+            <div className={styles.statCard}><div className={styles.statLabel}>教师</div><div className={styles.statValue}>{stats.teachers}</div></div>
+            <div className={styles.statCard}><div className={styles.statLabel}>学生</div><div className={styles.statValue}>{stats.students}</div></div>
+            <div className={styles.statCard}><div className={styles.statLabel}>班级</div><div className={styles.statValue}>{stats.classes}</div></div>
           </div>
         )}
 
-        {activeTab === "import" && (
+        {activeTab === "accounts" && (
           <div className={styles.section}>
-            <div className={styles.sectionHeader}><h2>按3个Excel模板导入</h2></div>
+            <div className={styles.sectionHeader}><h2>批量导入账号（默认密码 123456，首次登录强制改密）</h2></div>
             <div className={styles.modalInputGroup}>
-              <label>加分详情路径</label>
-              <input className={styles.modalInput} value={excelPaths.addDetailsPath} onChange={(e) => setExcelPaths((p) => ({ ...p, addDetailsPath: e.target.value }))} />
+              <label>导入角色</label>
+              <select className={styles.modalInput} value={importRole} onChange={(e) => setImportRole(e.target.value)}>
+                <option value="Student">学生</option>
+                <option value="Teacher">教师</option>
+              </select>
             </div>
-            <div className={styles.modalInputGroup}>
-              <label>减分详情路径</label>
-              <input className={styles.modalInput} value={excelPaths.minusDetailsPath} onChange={(e) => setExcelPaths((p) => ({ ...p, minusDetailsPath: e.target.value }))} />
-            </div>
-            <div className={styles.modalInputGroup}>
-              <label>记录表路径</label>
-              <input className={styles.modalInput} value={excelPaths.summaryPath} onChange={(e) => setExcelPaths((p) => ({ ...p, summaryPath: e.target.value }))} />
-            </div>
-            <div style={{ marginTop: "1rem" }}>
-              <button className={styles.addBtn} onClick={handleExcelImport} disabled={excelImporting}>
-                {excelImporting ? "导入中..." : "开始导入"}
-              </button>
-            </div>
-            {excelError && <div className={styles.emptyState}>{excelError}</div>}
-            {excelResult && (
-              <div className={styles.section}>
-                <div>新增班级：{excelResult.importedClasses}</div>
-                <div>新增学生：{excelResult.importedStudents}</div>
-                <div>导入流水：{excelResult.importedRecords}</div>
-                <div>汇总档案：{excelResult.importedProfiles}</div>
-                <div>自动建档：{excelResult.autoCreatedStudents}</div>
-                {excelResult.warnings.length > 0 && <div>提示：{excelResult.warnings.join("；")}</div>}
+            {importRole === "Student" && (
+              <div className={styles.modalInputGroup}>
+                <label>学生默认班级</label>
+                <select className={styles.modalInput} value={importClassId} onChange={(e) => setImportClassId(e.target.value)}>
+                  <option value="">--请选择班级--</option>
+                  {classOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
               </div>
             )}
+            <div className={styles.modalInputGroup}>
+              <label>文本导入（每行：学号/工号,姓名）</label>
+              <textarea className={styles.modalInput} style={{ minHeight: 140 }} value={importText} onChange={(e) => setImportText(e.target.value)} />
+              <button className={styles.addBtn} onClick={handleImportFromText}>文本导入</button>
+            </div>
+            <div className={styles.modalInputGroup}>
+              <label>Excel导入（前两列：账号、姓名）</label>
+              <input className={styles.modalInput} type="file" accept=".xlsx,.xls" onChange={(e) => setImportExcelFile(e.target.files?.[0] ?? null)} />
+              <button className={styles.addBtn} onClick={handleImportFromExcel}>Excel导入</button>
+            </div>
+
+            <div className={styles.sectionHeader}><h2>账号列表（最近100条）</h2></div>
+            <table className={styles.table}>
+              <thead><tr><th>账号</th><th>姓名</th><th>角色</th><th>班级</th></tr></thead>
+              <tbody>
+                {users.slice(0, 100).map((u) => (
+                  <tr key={u.id}><td>{u.username}</td><td>{u.name}</td><td>{u.role}</td><td>{u.class_name || "-"}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {activeTab === "classes" && (
+          <div className={styles.section}>
+            <div className={styles.sectionHeader}><h2>院系与班级</h2></div>
+            <div className={styles.modalInputGroup}>
+              <label>新增院系</label>
+              <input className={styles.modalInput} value={deptName} onChange={(e) => setDeptName(e.target.value)} />
+              <button className={styles.addBtn} onClick={handleCreateDepartment}>新增院系</button>
+            </div>
+
+            <div className={styles.modalInputGroup}>
+              <label>新增班级</label>
+              <select className={styles.modalInput} value={newClass.department_id} onChange={(e) => setNewClass((prev) => ({ ...prev, department_id: e.target.value }))}>
+                <option value="">--请选择院系--</option>
+                {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </select>
+              <input className={styles.modalInput} placeholder="班级名" value={newClass.name} onChange={(e) => setNewClass((prev) => ({ ...prev, name: e.target.value }))} />
+              <input className={styles.modalInput} placeholder="年级" value={newClass.grade} onChange={(e) => setNewClass((prev) => ({ ...prev, grade: e.target.value }))} />
+              <button className={styles.addBtn} onClick={handleCreateClass}>新增班级</button>
+            </div>
+
+            <div className={styles.modalInputGroup}>
+              <label>分配教师到班级</label>
+              <select className={styles.modalInput} value={assignForm.teacher_id} onChange={(e) => setAssignForm((prev) => ({ ...prev, teacher_id: e.target.value }))}>
+                <option value="">--请选择教师--</option>
+                {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}({t.username})</option>)}
+              </select>
+              <select className={styles.modalInput} value={assignForm.class_id} onChange={(e) => setAssignForm((prev) => ({ ...prev, class_id: e.target.value }))}>
+                <option value="">--请选择班级--</option>
+                {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <button className={styles.addBtn} onClick={handleAssignTeacher}>确认分配</button>
+            </div>
+
+            <table className={styles.table}>
+              <thead><tr><th>班级</th><th>院系</th><th>学生数</th><th>教师</th></tr></thead>
+              <tbody>
+                {classes.map((c) => (
+                  <tr key={c.id}>
+                    <td>{c.name}</td>
+                    <td>{c.department_name}</td>
+                    <td>{c.student_count}</td>
+                    <td>{(c.teachers || []).map((t: any) => t.name).join("、") || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
 
         {activeTab === "records" && (
-          <>
-            <div className={styles.section}>
-              <div className={styles.sectionHeader}><h2>记录表汇总</h2></div>
-              {recordsLoading ? (
-                <div className={styles.emptyState}>加载中...</div>
-              ) : (
-                <table className={styles.table}>
-                  <thead><tr><th>姓名</th><th>学号</th><th>班级</th><th>基础分</th><th>总分</th></tr></thead>
-                  <tbody>
-                    {summaryRows.map((row) => (
-                      <tr key={row.student_id}>
-                        <td>{row.name}</td>
-                        <td>{row.username}</td>
-                        <td>{row.class_name}</td>
-                        <td>{row.base_score}</td>
-                        <td>{row.total_score}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-
-            <div className={styles.section}>
-              <div className={styles.sectionHeader}><h2>加减分明细</h2></div>
-              {recordsLoading ? (
-                <div className={styles.emptyState}>加载中...</div>
-              ) : (
-                <table className={styles.table}>
-                  <thead><tr><th>班级</th><th>姓名</th><th>学号</th><th>分类</th><th>原因</th><th>分值</th><th>来源</th><th>时间</th></tr></thead>
-                  <tbody>
-                    {detailRows.map((row) => (
-                      <tr key={row.id}>
-                        <td>{row.class_name}</td>
-                        <td>{row.student_name}</td>
-                        <td>{row.student_username}</td>
-                        <td>{row.category}</td>
-                        <td>{row.reason}</td>
-                        <td className={row.points >= 0 ? styles.pointsPositive : styles.pointsNegative}>{row.points > 0 ? `+${row.points}` : row.points}</td>
-                        <td>{row.source || "-"}</td>
-                        <td>{row.created_at}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </>
+          <div className={styles.section}>
+            <div className={styles.sectionHeader}><h2>学生学分总览</h2></div>
+            <table className={styles.table}>
+              <thead><tr><th>姓名</th><th>学号</th><th>班级</th><th>基础分</th><th>总分</th></tr></thead>
+              <tbody>
+                {summaryRows.map((row) => (
+                  <tr key={row.student_id}><td>{row.name}</td><td>{row.username}</td><td>{row.class_name}</td><td>{row.base_score}</td><td>{row.total_score}</td></tr>
+                ))}
+              </tbody>
+            </table>
+            <div className={styles.sectionHeader} style={{ marginTop: "1.5rem" }}><h2>不可篡改流水</h2></div>
+            <table className={styles.table}>
+              <thead><tr><th>班级</th><th>姓名</th><th>分类</th><th>理由</th><th>分值</th><th>时间</th></tr></thead>
+              <tbody>
+                {detailRows.slice(0, 200).map((row) => (
+                  <tr key={row.id}><td>{row.class_name}</td><td>{row.student_name}</td><td>{row.category}</td><td>{row.reason}</td><td>{row.points}</td><td>{row.created_at}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </main>
     </div>

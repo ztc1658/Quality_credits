@@ -1,4 +1,4 @@
-import bcrypt from "bcryptjs";
+﻿import bcrypt from "bcryptjs";
 import fs from "fs";
 import path from "path";
 import {
@@ -413,6 +413,34 @@ function buildProfileFromRecords(studentId: number, records: CreditRecord[]): St
   };
 }
 
+function ensureProfileInDb(db: DbData, studentId: number): StudentProfile {
+  const existing = db.student_profiles.find((item) => item.student_id === studentId);
+  if (existing) return existing;
+  const fallback = buildProfileFromRecords(
+    studentId,
+    db.credit_records.filter((record) => record.student_id === studentId)
+  );
+  db.student_profiles.push(fallback);
+  return fallback;
+}
+
+function recalculateProfileTotal(profile: StudentProfile): void {
+  profile.total_score = profile.base_score + profile.major_program_bonus + sumScores(profile.category_scores);
+  profile.updated_at = now();
+}
+
+function applyRecordToProfile(profile: StudentProfile, reason: string, points: number): void {
+  const category = classifySummaryCategory(reason, points);
+  profile.category_scores[category] += points;
+  recalculateProfileTotal(profile);
+}
+
+function getManagedClassIds(db: DbData, teacherId: number): number[] {
+  return db.teacher_classes
+    .filter((item) => item.teacher_id === teacherId)
+    .map((item) => item.class_id);
+}
+
 function findOrCreateStudentByRecord(
   db: DbData,
   classInfo: ClassInfo,
@@ -507,6 +535,8 @@ function importRecordRows(
       source: row.source === "add" ? "加分详情导入" : "减分详情导入",
       created_at: now(),
     });
+    const profile = ensureProfileInDb(db, student.id);
+    applyRecordToProfile(profile, row.reason, row.points);
     count += 1;
   }
 
@@ -561,6 +591,14 @@ export function getAllUsers() {
 
 export function findUserByUsername(username: string): User | undefined {
   return loadDb().users.find((item) => item.username === username);
+}
+
+export function findUserById(userId: number): User | undefined {
+  return loadDb().users.find((item) => item.id === userId);
+}
+
+export function verifyPassword(user: User, plainPassword: string): boolean {
+  return bcrypt.compareSync(plainPassword, user.password);
 }
 
 export function createUser(data: {
@@ -775,22 +813,98 @@ export function getTeacherList() {
 
 // =============== 教师 -> 学生 (通过班级) ===============
 
-export function getStudentsByTeacher(teacherId: number) {
+export function canTeacherManageStudent(teacherId: number, studentId: number): boolean {
   const db = loadDb();
-  const classIds = db.teacher_classes
-    .filter((relation) => relation.teacher_id === teacherId)
-    .map((relation) => relation.class_id);
+  const student = db.users.find((item) => item.id === studentId && item.role === "Student");
+  if (!student?.class_id) return false;
+  return getManagedClassIds(db, teacherId).includes(student.class_id);
+}
+
+export function getStudentsByTeacher(teacherId: number) {
+  return getStudentsByTeacherFiltered({ teacherId });
+}
+
+export function getStudentsByTeacherFiltered(filters: {
+  teacherId: number;
+  keyword?: string;
+  minScore?: number;
+  maxScore?: number;
+}) {
+  const db = loadDb();
+  const classIds = getManagedClassIds(db, filters.teacherId);
+  const keyword = (filters.keyword ?? "").trim().toLowerCase();
 
   return db.users
     .filter((user) => user.role === "Student" && user.class_id && classIds.includes(user.class_id))
     .map((student) => {
       const { password: _password, ...rest } = student;
       void _password;
+      const className =
+        db.classes.find((classInfo) => classInfo.id === rest.class_id)?.name || "未知";
+      const profile = ensureProfileInDb(db, student.id);
+      const ledgerDelta = sumScores(profile.category_scores) + profile.major_program_bonus;
       return {
         ...rest,
-        class_name: db.classes.find((classInfo) => classInfo.id === rest.class_id)?.name || "未知",
+        class_name: className,
+        base_score: profile.base_score,
+        ledger_delta: ledgerDelta,
+        total_score: profile.total_score,
       };
+    })
+    .filter((row) => {
+      if (keyword) {
+        const hit =
+          row.username.toLowerCase().includes(keyword) ||
+          row.name.toLowerCase().includes(keyword) ||
+          row.class_name.toLowerCase().includes(keyword);
+        if (!hit) return false;
+      }
+      if (filters.minScore !== undefined && row.total_score < filters.minScore) return false;
+      if (filters.maxScore !== undefined && row.total_score > filters.maxScore) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      if (a.class_name !== b.class_name) return a.class_name.localeCompare(b.class_name, "zh-Hans-CN");
+      return a.username.localeCompare(b.username, "zh-Hans-CN");
     });
+}
+
+export function setBaseScoreByTeacher(data: {
+  teacherId: number;
+  baseScore: number;
+  classId?: number;
+  studentId?: number;
+}) {
+  const db = loadDb();
+  const classIds = getManagedClassIds(db, data.teacherId);
+  const baseScore = Number(data.baseScore);
+  if (!Number.isFinite(baseScore) || baseScore < 0) {
+    throw new Error("基础分必须是大于等于0的数值");
+  }
+
+  let students = db.users.filter((user) => user.role === "Student");
+  if (data.classId) {
+    students = students.filter((student) => student.class_id === data.classId);
+  }
+  if (data.studentId) {
+    students = students.filter((student) => student.id === data.studentId);
+  }
+
+  let updated = 0;
+  let skipped = 0;
+  for (const student of students) {
+    if (!student.class_id || !classIds.includes(student.class_id)) {
+      skipped += 1;
+      continue;
+    }
+    const profile = ensureProfileInDb(db, student.id);
+    profile.base_score = baseScore;
+    recalculateProfileTotal(profile);
+    updated += 1;
+  }
+
+  saveDb(db);
+  return { updated, skipped };
 }
 
 export function getStudentList() {
@@ -800,9 +914,12 @@ export function getStudentList() {
     .map((student) => {
       const { password: _password, ...rest } = student;
       void _password;
+      const profile = ensureProfileInDb(db, student.id);
       return {
         ...rest,
         class_name: db.classes.find((classInfo) => classInfo.id === rest.class_id)?.name || "未分配",
+        base_score: profile.base_score,
+        total_score: profile.total_score,
       };
     });
 }
@@ -815,18 +932,27 @@ export function addCreditRecord(data: {
   category: string;
   reason: string;
   points: number;
+  source?: string;
 }): CreditRecord {
   const db = loadDb();
+  const reason = (data.reason ?? "").trim();
+  if (!reason) throw new Error("加减分必须填写详细理由");
+  if (!Number.isFinite(data.points) || Number(data.points) === 0) {
+    throw new Error("学分分值必须为非0数值");
+  }
   const record: CreditRecord = {
     id: db._nextId.credit_records++,
     student_id: data.student_id,
     teacher_id: data.teacher_id,
     category: data.category,
-    reason: data.reason,
+    reason,
     points: data.points,
+    source: data.source ?? "教师手动操作",
     created_at: now(),
   };
   db.credit_records.push(record);
+  const profile = ensureProfileInDb(db, data.student_id);
+  applyRecordToProfile(profile, reason, data.points);
   saveDb(db);
   return record;
 }
@@ -851,6 +977,22 @@ export function getRecordsByStudent(studentId: number) {
       teacher_name: db.users.find((user) => user.id === record.teacher_id)?.name || "未知",
     }))
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
+export function getStudentOverview(studentId: number) {
+  const db = loadDb();
+  const profile = ensureProfileInDb(db, studentId);
+  const ledgerDelta = sumScores(profile.category_scores) + profile.major_program_bonus;
+  return {
+    student_id: studentId,
+    base_score: profile.base_score,
+    ledger_delta: ledgerDelta,
+    total_score: profile.total_score,
+    records_count: db.credit_records.filter((item) => item.student_id === studentId).length,
+    pending_applications: db.credit_applications.filter(
+      (item) => item.student_id === studentId && item.status === "Pending"
+    ).length,
+  };
 }
 
 export function getAllCreditRecords(): AdminCreditRecordRow[] {
@@ -939,14 +1081,21 @@ export function createApplication(data: {
   category: string;
   reason: string;
   points: number;
+  proof?: string;
 }): CreditApplication {
   const db = loadDb();
+  if (!Number.isFinite(data.points) || data.points <= 0) {
+    throw new Error("加分申请分值必须大于0");
+  }
+  const reason = (data.reason ?? "").trim();
+  if (!reason) throw new Error("申请理由不能为空");
   const app: CreditApplication = {
     id: db._nextId.credit_applications++,
     student_id: data.student_id,
     category: data.category,
-    reason: data.reason,
+    reason,
     points: data.points,
+    proof: data.proof,
     status: "Pending",
     created_at: now(),
   };
@@ -958,11 +1107,28 @@ export function createApplication(data: {
 export function getAllApplications() {
   const db = loadDb();
   return db.credit_applications
-    .map((item) => ({
-      ...item,
-      student_name: db.users.find((user) => user.id === item.student_id)?.name || "未知",
-    }))
+    .map((item) => {
+      const student = db.users.find((user) => user.id === item.student_id);
+      return {
+        ...item,
+        student_name: student?.name || "未知",
+        student_username: student?.username || "-",
+        class_name:
+          student?.class_id !== undefined
+            ? db.classes.find((cls) => cls.id === student.class_id)?.name || "未分配"
+            : "未分配",
+      };
+    })
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
+export function getApplicationsByTeacher(teacherId: number) {
+  const db = loadDb();
+  const classIds = getManagedClassIds(db, teacherId);
+  return getAllApplications().filter((item) => {
+    const student = db.users.find((user) => user.id === item.student_id);
+    return Boolean(student?.class_id && classIds.includes(student.class_id));
+  });
 }
 
 export function getApplicationsByStudent(studentId: number) {
@@ -971,26 +1137,50 @@ export function getApplicationsByStudent(studentId: number) {
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
-export function reviewApplication(appId: number, status: string, reviewerId: number) {
+export function reviewApplication(
+  appId: number,
+  status: string,
+  reviewerId: number,
+  reviewNote?: string
+) {
   const db = loadDb();
   const app = db.credit_applications.find((item) => item.id === appId);
   if (!app) return null;
 
+  if (!["Approved", "Rejected"].includes(status)) {
+    throw new Error("审批状态无效");
+  }
+
+  const student = db.users.find((user) => user.id === app.student_id);
+  if (!student) throw new Error("申请学生不存在");
+
+  const reviewer = db.users.find((user) => user.id === reviewerId);
+  if (!reviewer) throw new Error("审核人不存在");
+  if (reviewer.role === "Teacher") {
+    if (!student.class_id || !getManagedClassIds(db, reviewerId).includes(student.class_id)) {
+      throw new Error("无权审核该学生申请");
+    }
+  }
+
+  const previousStatus = app.status;
   app.status = status;
   app.reviewer_id = reviewerId;
+  app.review_note = reviewNote?.trim();
   app.reviewed_at = now();
 
-  if (status === "Approved") {
+  if (status === "Approved" && previousStatus !== "Approved") {
     db.credit_records.push({
       id: db._nextId.credit_records++,
       student_id: app.student_id,
       teacher_id: reviewerId,
       category: app.category,
       reason: app.reason,
-      points: app.points,
-      source: "申报通过",
+      points: Math.abs(app.points),
+      source: "学生申请审批通过",
       created_at: now(),
     });
+    const profile = ensureProfileInDb(db, app.student_id);
+    applyRecordToProfile(profile, app.reason, Math.abs(app.points));
   }
 
   saveDb(db);
@@ -1019,14 +1209,14 @@ export function importFromExcelTemplates(options: ImportExcelOptions): ImportExc
   const department = ensureDepartmentInDb(db, "Excel导入");
   const defaultPasswordHash = bcrypt.hashSync("123456", 10);
 
-  let importer = db.users.find((user) => user.username === "excel_importer");
+  let importer = db.users.find((user) => user.username === "90000001");
   if (!importer) {
     importer = createUserInDb(db, {
-      username: "excel_importer",
-      password: bcrypt.hashSync("excel123", 10),
-      name: "Excel导入教师",
+      username: "90000001",
+      password: defaultPasswordHash,
+      name: "导入教师",
       role: "Teacher",
-      password_changed: true,
+      password_changed: false,
     });
   }
 

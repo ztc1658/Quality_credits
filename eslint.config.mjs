@@ -10,6 +10,7 @@ const eslintConfig = defineConfig([
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-require-imports": "off",
       "react-hooks/immutability": "off",
+      "react-hooks/set-state-in-effect": "off",
       "react/no-unescaped-entities": "off",
       "@typescript-eslint/no-unused-vars": [
         "warn",
