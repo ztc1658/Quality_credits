@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAllDepartments, createDepartment, batchImportDepartments, getAllClasses, createClass, batchImportClasses, getTeacherList, assignTeacherToClass, removeTeacherFromClass } from '@/lib/db';
+import { getAllDepartments, createDepartment, batchImportDepartments, getAllClasses, createClass, batchImportClasses, getTeacherList, assignTeacherToClass, removeTeacherFromClass, batchAssignTeachers } from '@/lib/db';
 
 export async function GET(req: NextRequest) {
   try {
@@ -32,6 +32,9 @@ export async function POST(req: NextRequest) {
     if (action === 'assignTeacher') {
       assignTeacherToClass(body.teacher_id, body.class_id);
       return NextResponse.json({ message: '教师已分配' });
+    }
+    if (action === 'batchAssignTeachers') {
+      return NextResponse.json(batchAssignTeachers(body.items || []));
     }
     if (action === 'removeTeacher') {
       removeTeacherFromClass(body.teacher_id, body.class_id);

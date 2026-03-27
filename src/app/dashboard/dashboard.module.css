@@ -182,6 +182,12 @@
 }
 
 .addBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  align-self: flex-start;
+  white-space: nowrap;
   padding: 0.5rem 1.2rem;
   border-radius: var(--radius-md);
   border: none;

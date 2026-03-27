@@ -39,6 +39,9 @@ export default function AdminDashboard() {
   const [deptName, setDeptName] = useState("");
   const [newClass, setNewClass] = useState({ name: "", grade: "", department_id: "" });
   const [assignForm, setAssignForm] = useState({ teacher_id: "", class_id: "" });
+  const [batchDeptText, setBatchDeptText] = useState("");
+  const [batchClassText, setBatchClassText] = useState("");
+  const [batchAssignText, setBatchAssignText] = useState("");
 
   const [importRole, setImportRole] = useState("Student");
   const [importClassId, setImportClassId] = useState("");
@@ -109,6 +112,24 @@ export default function AdminDashboard() {
     await refreshAll();
   };
 
+  const handleBatchDepartmentImport = async () => {
+    clearTips();
+    const names = batchDeptText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (names.length === 0) return;
+    const res = await fetch("/api/admin/classes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "batchImportDepartments", names }),
+    });
+    const data = await res.json();
+    if (!res.ok) return setError(data.error || "院系批量导入失败");
+    setMessage(`院系批量导入完成：新增 ${data.imported}，跳过 ${data.skipped?.length || 0}`);
+    await refreshAll();
+  };
+
   const handleCreateClass = async () => {
     clearTips();
     if (!newClass.name || !newClass.department_id) return;
@@ -128,6 +149,34 @@ export default function AdminDashboard() {
     await refreshAll();
   };
 
+  const handleBatchClassImport = async () => {
+    clearTips();
+    const rows = batchClassText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const parts = line.split(/[,，\t]/).map((v) => v.trim());
+        return {
+          name: parts[0] || "",
+          grade: parts[1] || "未知",
+          department_name: parts[2] || "",
+        };
+      })
+      .filter((item) => item.name && item.department_name);
+    if (rows.length === 0) return;
+
+    const res = await fetch("/api/admin/classes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "batchImportClasses", classes: rows }),
+    });
+    const data = await res.json();
+    if (!res.ok) return setError(data.error || "班级批量导入失败");
+    setMessage(`班级批量导入完成：新增 ${data.imported}，跳过 ${data.skipped?.length || 0}`);
+    await refreshAll();
+  };
+
   const handleAssignTeacher = async () => {
     clearTips();
     if (!assignForm.teacher_id || !assignForm.class_id) return;
@@ -143,6 +192,33 @@ export default function AdminDashboard() {
     if (!res.ok) return setError("分配失败");
     setAssignForm({ teacher_id: "", class_id: "" });
     setMessage("教师分配成功");
+    await refreshAll();
+  };
+
+  const handleBatchAssignTeacher = async () => {
+    clearTips();
+    const items = batchAssignText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const parts = line.split(/[,，\t]/).map((v) => v.trim());
+        return {
+          teacher_username: parts[0] || "",
+          class_name: parts[1] || "",
+        };
+      })
+      .filter((item) => item.teacher_username && item.class_name);
+
+    if (items.length === 0) return;
+    const res = await fetch("/api/admin/classes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "batchAssignTeachers", items }),
+    });
+    const data = await res.json();
+    if (!res.ok) return setError(data.error || "批量分配失败");
+    setMessage(`批量分配完成：成功 ${data.assigned}，跳过 ${data.skipped?.length || 0}`);
     await refreshAll();
   };
 
@@ -273,6 +349,17 @@ export default function AdminDashboard() {
               <input className={styles.modalInput} value={deptName} onChange={(e) => setDeptName(e.target.value)} />
               <button className={styles.addBtn} onClick={handleCreateDepartment}>新增院系</button>
             </div>
+            <div className={styles.modalInputGroup}>
+              <label>批量导入院系（每行一个名称）</label>
+              <textarea
+                className={styles.modalInput}
+                style={{ minHeight: 110 }}
+                value={batchDeptText}
+                onChange={(e) => setBatchDeptText(e.target.value)}
+                placeholder={"示例：\n计算机学院\n外国语学院\n新能源学院"}
+              />
+              <button className={styles.addBtn} onClick={handleBatchDepartmentImport}>批量导入院系</button>
+            </div>
 
             <div className={styles.modalInputGroup}>
               <label>新增班级</label>
@@ -283,6 +370,17 @@ export default function AdminDashboard() {
               <input className={styles.modalInput} placeholder="班级名" value={newClass.name} onChange={(e) => setNewClass((prev) => ({ ...prev, name: e.target.value }))} />
               <input className={styles.modalInput} placeholder="年级" value={newClass.grade} onChange={(e) => setNewClass((prev) => ({ ...prev, grade: e.target.value }))} />
               <button className={styles.addBtn} onClick={handleCreateClass}>新增班级</button>
+            </div>
+            <div className={styles.modalInputGroup}>
+              <label>批量导入班级（每行：班级名,年级,院系名）</label>
+              <textarea
+                className={styles.modalInput}
+                style={{ minHeight: 110 }}
+                value={batchClassText}
+                onChange={(e) => setBatchClassText(e.target.value)}
+                placeholder={"示例：\n软件工程1班,2024,计算机学院\n软件工程2班,2024,计算机学院"}
+              />
+              <button className={styles.addBtn} onClick={handleBatchClassImport}>批量导入班级</button>
             </div>
 
             <div className={styles.modalInputGroup}>
@@ -296,6 +394,17 @@ export default function AdminDashboard() {
                 {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
               <button className={styles.addBtn} onClick={handleAssignTeacher}>确认分配</button>
+            </div>
+            <div className={styles.modalInputGroup}>
+              <label>批量分配教师（每行：教师账号,班级名）</label>
+              <textarea
+                className={styles.modalInput}
+                style={{ minHeight: 110 }}
+                value={batchAssignText}
+                onChange={(e) => setBatchAssignText(e.target.value)}
+                placeholder={"示例：\n20249999,软件工程1班\n20249998,软件工程2班"}
+              />
+              <button className={styles.addBtn} onClick={handleBatchAssignTeacher}>批量分配教师</button>
             </div>
 
             <table className={styles.table}>

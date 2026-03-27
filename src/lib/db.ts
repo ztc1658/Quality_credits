@@ -800,6 +800,57 @@ export function removeTeacherFromClass(teacherId: number, classId: number) {
   saveDb(db);
 }
 
+export function batchAssignTeachers(
+  list: { teacher_username: string; class_name: string }[]
+): { assigned: number; skipped: string[] } {
+  const db = loadDb();
+  let assigned = 0;
+  const skipped: string[] = [];
+
+  const normalize = (text: string) =>
+    text
+      .trim()
+      .replace(/\s+/g, "")
+      .replace(/（/g, "(")
+      .replace(/）/g, ")")
+      .toLowerCase();
+
+  for (const item of list) {
+    const teacherUsername = String(item.teacher_username ?? "").trim();
+    const className = String(item.class_name ?? "").trim();
+    if (!teacherUsername || !className) continue;
+
+    const teacher = db.users.find(
+      (user) => user.role === "Teacher" && user.username === teacherUsername
+    );
+    if (!teacher) {
+      skipped.push(`${teacherUsername}->${className}(教师不存在)`);
+      continue;
+    }
+
+    const normalizedTarget = normalize(className);
+    const classInfo = db.classes.find((cls) => normalize(cls.name) === normalizedTarget);
+    if (!classInfo) {
+      skipped.push(`${teacherUsername}->${className}(班级不存在)`);
+      continue;
+    }
+
+    const exists = db.teacher_classes.some(
+      (relation) => relation.teacher_id === teacher.id && relation.class_id === classInfo.id
+    );
+    if (exists) {
+      skipped.push(`${teacherUsername}->${className}(已分配)`);
+      continue;
+    }
+
+    db.teacher_classes.push({ teacher_id: teacher.id, class_id: classInfo.id });
+    assigned += 1;
+  }
+
+  saveDb(db);
+  return { assigned, skipped };
+}
+
 export function getTeacherList() {
   const db = loadDb();
   return db.users
